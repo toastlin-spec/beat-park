@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>節奏樂園測試</title>
+<style>
+  body { font-family: "Microsoft JhengHei", sans-serif; margin: 24px; background: #fff; color: #222; }
+  .pass { color: #17693a; }
+  .fail { color: #b3261e; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1 id="summary">執行中</h1>
+<ul id="results"></ul>
+<script src="js/core.js"></script>
+<script src="js/songs.js"></script>
+<script>
+(function () {
+  'use strict';
+  const Core = window.BeatCore;
+  const songs = window.BeatSongs;
+  const tests = [];
+  const test = (name, fn) => tests.push({ name, fn });
+  const eq = (actual, expected, label) => {
+    if (actual !== expected) throw new Error((label || '值') + '：預期 ' + expected + '，實際 ' + actual);
+  };
+  const ok = (value, label) => { if (!value) throw new Error(label); };
+
+  const miniSong = (bars) => ({ bpm: 120, charts: { normal: bars } });
+  const miniRun = (bars, difficulty) => {
+    const chosen = difficulty || Core.DIFFICULTIES.normal;
+    return Core.createRun(Core.buildChart(miniSong(bars), 'normal'), chosen);
+  };
+  const STEP = 60 / 120 / 4;
+
+  test('完整版有 3 首不同的歌，都有演奏樂器', () => {
+    eq(songs.length, 3, '歌曲數');
+    eq(new Set(songs.map((song) => song.id)).size, 3, '不重複的歌曲 id');
+    songs.forEach((song) => ok(['marimba', 'koto', 'brass'].includes(song.groove.lead), song.id + ' 主奏樂器無效'));
+  });
+
+  test('一首歌的長度約 60～90 秒', () => {
+    songs.forEach((song) => {
+      const duration = Core.buildChart(song, 'easy').duration;
+      ok(duration >= 60 && duration <= 90, song.id + ' 長度 ' + duration.toFixed(1) + ' 秒');
+    });
+  });
+
+  test('每個難度的譜面都能解析，長度和歌曲一致', () => {
+    songs.forEach((song) => {
+      Object.keys(Core.DIFFICULTIES).forEach((id) => {
+        const chart = Core.buildChart(song, id);
+        ok(chart.notes.length > 0, song.id + ' ' + id + ' 沒有音符');
+        eq(song.charts[id].length, song.introBars + song.melody.length + song.outroBars, song.id + ' ' + id + ' 小節數');
+      });
+    });
+  });
+
+  test('難度越高，音符越多', () => {
+    songs.forEach((song) => {
+      const count = (id) => Core.buildChart(song, id).notes.length;
+      ok(count('easy') < count('normal') && count('normal') < count('expert'), song.id + ' 音符數沒有遞增');
+    });
+  });
+
+  test('旋律每小節剛好 16 步，音高都有效', () => {
+    songs.forEach((song) => {
+      song.melody.forEach((bar, index) => {
+        eq(bar.reduce((sum, note) => sum + note.steps, 0), 16, song.id + ' 第 ' + index + ' 小節步數');
+        bar.forEach((note) => ok(note.pitch === null || Number.isFinite(note.pitch), song.id + ' 第 ' + index + ' 小節有無效音高'));
+      });
+    });
+  });
+
+  test('和弦數量與旋律小節數相同', () => {
+    songs.forEach((song) => {
+      eq(song.chords.length, song.melody.length, song.id + ' 和弦數');
+      song.chords.forEach((root, index) => ok(Number.isFinite(root), song.id + ' 第 ' + index + ' 個和弦無效'));
+    });
+  });
+
+  test('譜面長度錯誤或符號未知時會報錯', () => {
+    let threw = 0;
+    try { Core.buildChart(miniSong(['o...']), 'normal'); } catch (error) { threw++; }
+    try { Core.buildChart(miniSong(['z...............']), 'normal'); } catch (error) { threw++; }
+    try { Core.buildChart(miniSong(['-...............']), 'normal'); } catch (error) { threw++; }
+    eq(threw, 3, '報錯次數');
+  });
+
+  test('音符時間按 BPM 計算', () => {
+    const chart = Core.buildChart(miniSong(['o...x...........']), 'normal');
+    eq(chart.notes[0].time, 0);
+    eq(chart.notes[1].time, 4 * STEP);
+    eq(chart.duration, 16 * STEP);
+  });
+
+  test('連打音符的結束時間正確，且可跨小節', () => {
+    const chart = Core.buildChart(miniSong(['........R-------', '----............']), 'normal');
+    eq(chart.notes.length, 1);
+    eq(chart.notes[0].time, 8 * STEP);
+    eq(chart.notes[0].end, 20 * STEP);
+  });
+
+  test('判定分級依時間差', () => {
+    const windows = Core.DIFFICULTIES.normal.windows;
+    const bars = ['o...o...o.......'];
+    const run = miniRun(bars);
+    eq(Core.judgeHit(run, 'low', 0).type, 'perfect');
+    eq(Core.judgeHit(run, 'low', 4 * STEP + windows.great - 0.001).type, 'great');
+    eq(Core.judgeHit(run, 'low', 8 * STEP - windows.good + 0.001).type, 'good');
+  });
+
+  test('判定範圍外的敲擊不影響任何音符', () => {
+    const run = miniRun(['........o.......']);
+    eq(Core.judgeHit(run, 'low', 0), null);
+    eq(run.notes[0].result, null);
+    eq(run.combo, 0);
+  });
+
+  test('敲錯鼓會讓音符判漏並中斷連擊', () => {
+    const run = miniRun(['o...x...........']);
+    Core.judgeHit(run, 'low', 0);
+    eq(run.combo, 1);
+    eq(Core.judgeHit(run, 'low', 4 * STEP).type, 'wrong');
+    eq(run.notes[1].result, 'miss');
+    eq(run.combo, 0);
+  });
+
+  test('有相同鼓種可打時，不會誤判旁邊的不同鼓種', () => {
+    const run = miniRun(['ox..............'], Core.DIFFICULTIES.expert);
+    const result = Core.judgeHit(run, 'high', STEP);
+    eq(result.type, 'perfect');
+    eq(run.notes[0].result, null);
+  });
+
+  test('密集音符會選最近的那一顆', () => {
+    const run = miniRun(['oo..............']);
+    const result = Core.judgeHit(run, 'low', STEP - 0.01);
+    eq(result.note, run.notes[1]);
+  });
+
+  test('過期音符會判漏，且只判一次', () => {
+    const run = miniRun(['o...o...........']);
+    eq(Core.sweepMisses(run, 1).length, 2);
+    eq(Core.sweepMisses(run, 2).length, 0);
+    eq(run.counts.miss, 2);
+    eq(run.cursor, 2);
+  });
+
+  test('跳著打時，較早的音符之後仍會判漏', () => {
+    const run = miniRun(['oo..............']);
+    Core.judgeHit(run, 'low', STEP);
+    eq(Core.sweepMisses(run, 5).length, 1);
+    eq(run.notes[0].result, 'miss');
+    eq(run.notes[1].result, 'perfect');
+  });
+
+  test('連打期間任一鼓都加分，結束後不再計入', () => {
+    const run = miniRun(['R-------o.......']);
+    eq(Core.judgeHit(run, 'low', STEP).type, 'roll');
+    eq(Core.judgeHit(run, 'high', 2 * STEP).type, 'roll');
+    eq(run.rollHits, 2);
+    eq(run.score, 100);
+    Core.sweepMisses(run, 8 * STEP + 0.001);
+    eq(run.notes[0].result, 'done');
+    eq(Core.judgeHit(run, 'low', 8 * STEP).type, 'perfect');
+  });
+
+  test('連打不會影響準確率和全連擊', () => {
+    const run = miniRun(['R-------o.......']);
+    Core.sweepMisses(run, 8 * STEP - 0.2);
+    Core.judgeHit(run, 'low', 8 * STEP);
+    Core.sweepMisses(run, 99);
+    const summary = Core.summarize(run);
+    eq(summary.accuracy, 1);
+    eq(summary.fullCombo, true);
+    eq(summary.grade, 'S');
+  });
+
+  Object.keys(Core.DIFFICULTIES).forEach((id) => {
+    test(Core.DIFFICULTIES[id].label + '：每首歌全部準時都得到 S，最高連擊等於音符數', () => {
+      songs.forEach((song) => {
+        const run = Core.createRun(Core.buildChart(song, id), Core.DIFFICULTIES[id]);
+        run.notes.forEach((note) => {
+          if (note.kind !== 'roll') Core.judgeHit(run, note.kind, note.time);
+        });
+        Core.sweepMisses(run, Infinity);
+        const summary = Core.summarize(run);
+        const total = run.notes.filter((note) => note.kind !== 'roll').length;
+        eq(summary.grade, 'S', song.id);
+        eq(summary.fullCombo, true, song.id);
+        eq(summary.counts.miss, 0, song.id);
+        eq(summary.counts.perfect, total, song.id);
+        eq(summary.maxCombo, total, song.id + ' 最高連擊');
+      });
+    });
+
+    test(Core.DIFFICULTIES[id].label + '：每首歌完全不打都得到 D 且未通過', () => {
+      songs.forEach((song) => {
+        const run = Core.createRun(Core.buildChart(song, id), Core.DIFFICULTIES[id]);
+        Core.sweepMisses(run, Infinity);
+        const summary = Core.summarize(run);
+        eq(summary.grade, 'D', song.id);
+        eq(summary.cleared, false, song.id);
+        eq(summary.score, 0, song.id);
+      });
+    });
+  });
+
+  test('連擊會累加，漏接後歸零，最高連擊會保留', () => {
+    const run = miniRun(['o...o...o.......']);
+    Core.judgeHit(run, 'low', 0);
+    Core.judgeHit(run, 'low', 4 * STEP);
+    eq(run.combo, 2);
+    Core.sweepMisses(run, 99);
+    eq(run.combo, 0);
+    eq(run.maxCombo, 2);
+  });
+
+  test('達人譜面最快的相鄰同種音符不會互相吃掉', () => {
+    songs.forEach((song) => {
+      const run = Core.createRun(Core.buildChart(song, 'expert'), Core.DIFFICULTIES.expert);
+      run.notes.forEach((note) => {
+        if (note.kind !== 'roll') Core.judgeHit(run, note.kind, note.time + 0.02);
+      });
+      Core.sweepMisses(run, Infinity);
+      eq(run.counts.miss, 0, song.id);
+    });
+  });
+
+  test('兩個按鈕也打得到：同一顆鼓最多連續 2 個十六分音符', () => {
+    songs.forEach((song) => {
+      const sixteenth = 60 / song.bpm / 4;
+      Object.keys(Core.DIFFICULTIES).forEach((id) => {
+        const notes = Core.buildChart(song, id).notes.filter((note) => note.kind !== 'roll');
+        let streak = 1;
+        for (let i = 1; i < notes.length; i++) {
+          const isFastRepeat = notes[i].kind === notes[i - 1].kind
+            && notes[i].time - notes[i - 1].time < sixteenth * 1.5;
+          streak = isFastRepeat ? streak + 1 : 1;
+          ok(streak <= 2, song.id + ' ' + id + ' 在 ' + notes[i].time.toFixed(2) + ' 秒連續 ' + streak + ' 個同鼓十六分音符');
+        }
+      });
+    });
+  });
+
+  test('中位數可忽略極端值', () => {
+    eq(Core.median([0.01, 0.02, 0.5]), 0.02);
+    eq(Core.median([0.01, 0.03]), 0.02);
+    eq(Core.median([]), 0);
+  });
+
+  const list = document.getElementById('results');
+  let failed = 0;
+  const failures = [];
+  tests.forEach(({ name, fn }) => {
+    const item = document.createElement('li');
+    try {
+      fn();
+      item.className = 'pass';
+      item.textContent = '通過：' + name;
+    } catch (error) {
+      failed++;
+      failures.push(name + ' → ' + error.message);
+      item.className = 'fail';
+      item.textContent = '失敗：' + name + ' → ' + error.message;
+    }
+    list.append(item);
+  });
+  document.getElementById('summary').textContent = (tests.length - failed) + ' / ' + tests.length + ' 通過';
+  window.__testResults = { total: tests.length, failed, failures };
+})();
+</script>
+</body>
+</html>
